@@ -1,0 +1,300 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cognito User Pool with MFA support for CognitoOnBase test application'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  AppName:
+    Type: String
+    Default: CognitoMFATest
+    Description: Application name used for resource naming
+
+  MfaConfiguration:
+    Type: String
+    Default: OPTIONAL
+    AllowedValues:
+      - 'OFF'
+      - OPTIONAL
+      - 'ON'
+    Description: MFA configuration (OFF, OPTIONAL, or ON/required)
+
+  AdminEmail:
+    Type: String
+    Description: Admin email for notifications
+    Default: ''
+
+  AllowedCallbackURLs:
+    Type: CommaDelimitedList
+    Default: 'http://localhost:4200,http://localhost:4200/callback'
+    Description: Allowed callback URLs for the app client
+
+  AllowedLogoutURLs:
+    Type: CommaDelimitedList
+    Default: 'http://localhost:4200,http://localhost:4200/logout'
+    Description: Allowed logout URLs for the app client
+
+Resources:
+  # SNS Topic for MFA SMS (optional)
+  MfaSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AppName}-${Environment}-mfa-notifications'
+      DisplayName: 'Cognito MFA Notifications'
+
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AppName}-${Environment}-users'
+
+      # Username configuration
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: false
+
+      # Auto verification
+      AutoVerifiedAttributes:
+        - email
+
+      # MFA Configuration
+      MfaConfiguration: !Ref MfaConfiguration
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+        # - SMS_MFA  # Uncomment if you want SMS MFA (requires SNS setup)
+
+      # Password policy
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+
+      # Account recovery
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+      # Schema attributes
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+        - Name: phone_number
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+
+      # Email configuration (use Cognito default or configure SES)
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+
+      # Verification message customization
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+        EmailSubject: 'Your verification code for CognitoMFA Test'
+        EmailMessage: 'Your verification code is {####}. This code expires in 24 hours.'
+
+      # User pool add-ons
+      UserPoolAddOns:
+        AdvancedSecurityMode: 'OFF'  # Change to ENFORCED for production
+
+      # Admin create user config
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+        InviteMessageTemplate:
+          EmailSubject: 'Welcome to CognitoMFA Test'
+          EmailMessage: 'Your username is {username} and temporary password is {####}. Please login and change your password.'
+
+      # Device tracking (optional)
+      DeviceConfiguration:
+        ChallengeRequiredOnNewDevice: false
+        DeviceOnlyRememberedOnUserPrompt: true
+
+      # Tags
+      UserPoolTags:
+        Application: !Ref AppName
+        Environment: !Ref Environment
+
+  # User Pool Domain (for hosted UI - optional but recommended)
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '${AppName}-${Environment}-${AWS::AccountId}'
+      UserPoolId: !Ref UserPool
+
+  # App Client (for Angular application)
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${AppName}-${Environment}-angular-client'
+      UserPoolId: !Ref UserPool
+
+      # Authentication flows
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+
+      # Token validity
+      AccessTokenValidity: 1  # hours
+      IdTokenValidity: 1      # hours
+      RefreshTokenValidity: 30 # days
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+      # No client secret (for public clients like SPAs)
+      GenerateSecret: false
+
+      # Prevent user existence errors
+      PreventUserExistenceErrors: ENABLED
+
+      # OAuth settings (for hosted UI)
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      CallbackURLs: !Ref AllowedCallbackURLs
+      LogoutURLs: !Ref AllowedLogoutURLs
+      SupportedIdentityProviders:
+        - COGNITO
+
+      # Read/write attributes
+      ReadAttributes:
+        - email
+        - email_verified
+        - name
+        - phone_number
+        - phone_number_verified
+      WriteAttributes:
+        - email
+        - name
+        - phone_number
+
+  # App Client with Secret (for backend/confidential clients)
+  UserPoolClientConfidential:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${AppName}-${Environment}-api-client'
+      UserPoolId: !Ref UserPool
+
+      ExplicitAuthFlows:
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+      # Generate secret for server-side use
+      GenerateSecret: true
+
+      PreventUserExistenceErrors: ENABLED
+
+      ReadAttributes:
+        - email
+        - email_verified
+        - name
+        - phone_number
+        - phone_number_verified
+      WriteAttributes:
+        - email
+        - name
+        - phone_number
+
+  # Resource Server (optional - for API scopes)
+  UserPoolResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      Identifier: !Sub '${AppName}-api'
+      Name: !Sub '${AppName} API'
+      UserPoolId: !Ref UserPool
+      Scopes:
+        - ScopeName: read
+          ScopeDescription: Read access to the API
+        - ScopeName: write
+          ScopeDescription: Write access to the API
+
+  # User Pool Group - Admins
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Admins
+      UserPoolId: !Ref UserPool
+      Description: Administrator users with full access
+      Precedence: 0
+
+  # User Pool Group - Users
+  UsersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Users
+      UserPoolId: !Ref UserPool
+      Description: Regular users
+      Precedence: 10
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub '${AppName}-${Environment}-UserPoolId'
+
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt UserPool.Arn
+    Export:
+      Name: !Sub '${AppName}-${Environment}-UserPoolArn'
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID (Angular app)
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub '${AppName}-${Environment}-UserPoolClientId'
+
+  UserPoolClientIdConfidential:
+    Description: Cognito User Pool Client ID (API/Backend)
+    Value: !Ref UserPoolClientConfidential
+    Export:
+      Name: !Sub '${AppName}-${Environment}-UserPoolClientIdConfidential'
+
+  UserPoolDomain:
+    Description: Cognito User Pool Domain
+    Value: !Sub '${AppName}-${Environment}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com'
+    Export:
+      Name: !Sub '${AppName}-${Environment}-UserPoolDomain'
+
+  HostedUIURL:
+    Description: Hosted UI Login URL
+    Value: !Sub 'https://${AppName}-${Environment}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${UserPoolClient}&response_type=code&scope=email+openid+profile&redirect_uri=http://localhost:4200/callback'
+
+  Region:
+    Description: AWS Region
+    Value: !Ref AWS::Region
